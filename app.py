@@ -5,7 +5,16 @@ from streamlit_chat import message
 from sentence_transformers import SentenceTransformer
 from pinecone import Pinecone
 from openai import OpenAI
-import glob
+from langchain_pinecone import PineconeVectorStore
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain.schema import Document
+
+# Constants
+SUPPORTED_EXTENSIONS = {'.py', '.js', '.tsx', '.jsx', '.ipynb', '.java', 
+                       '.cpp', '.ts', '.go', '.rs', '.vue', '.swift', '.c', '.h'}
+
+IGNORED_DIRS = {'node_modules', 'venv', 'env', 'dist', 'build', '.git',
+                '__pycache__', '.next', '.vscode', 'vendor'}
 
 # Initialize clients
 pinecone = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
@@ -16,73 +25,67 @@ llm_client = OpenAI(
     api_key=st.secrets["GROQ_API_KEY"]
 )
 
-# Initialize the embedding model
-@st.cache_resource
-def get_embedding_model():
-    return SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
-
-def get_file_content(file_path):
-    """Read and return the content of a file."""
+def get_file_content(file_path, repo_path):
+    """Get content of a single file."""
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            return {
-                "name": os.path.relpath(file_path),
-                "content": f.read()
-            }
+            content = f.read()
+        rel_path = os.path.relpath(file_path, repo_path)
+        return {
+            "name": rel_path,
+            "content": content
+        }
     except Exception as e:
-        st.error(f"Error reading file {file_path}: {str(e)}")
+        st.error(f"Error processing file {file_path}: {str(e)}")
         return None
 
-def process_repository(repo_path):
-    """Process all code files in the repository."""
-    # Define supported file extensions
-    supported_extensions = {'.py', '.js', '.jsx', '.ts', '.tsx', '.java', '.cpp', '.c', '.h', '.go'}
-    
-    documents = []
-    for root, _, files in os.walk(repo_path):
-        for file in files:
-            if any(file.endswith(ext) for ext in supported_extensions):
+def get_main_files_content(repo_path: str):
+    """Get content of supported code files from the repository."""
+    files_content = []
+    try:
+        for root, _, files in os.walk(repo_path):
+            if any(ignored_dir in root for ignored_dir in IGNORED_DIRS):
+                continue
+            for file in files:
                 file_path = os.path.join(root, file)
-                file_content = get_file_content(file_path)
-                if file_content:
-                    documents.append(file_content)
-    return documents
+                if os.path.splitext(file)[1] in SUPPORTED_EXTENSIONS:
+                    file_content = get_file_content(file_path, repo_path)
+                    if file_content:
+                        files_content.append(file_content)
+    except Exception as e:
+        st.error(f"Error reading repository: {str(e)}")
+    return files_content
 
-def embed_and_store(documents):
-    """Create embeddings and store in Pinecone."""
-    model = get_embedding_model()
-    
-    for doc in documents:
-        # Create embedding for the document
-        embedding = model.encode(f"{doc['name']}\n{doc['content']}")
-        
-        # Store in Pinecone
-        pinecone_index.upsert(
-            vectors=[{
-                "id": doc['name'],
-                "values": embedding.tolist(),
-                "metadata": {
-                    "source": doc['name'],
-                    "text": f"{doc['name']}\n{doc['content']}"
-                }
-            }],
-            namespace="current-repo"
+def process_repository(repo_path):
+    """Process repository files and store in Pinecone."""
+    files_content = get_main_files_content(repo_path)
+    documents = []
+    for file in files_content:
+        doc = Document(
+            page_content=f"{file['name']}\n{file['content']}",
+            metadata={"source": file['name']}
         )
+        documents.append(doc)
+    
+    vectorstore = PineconeVectorStore.from_documents(
+        documents=documents,
+        embedding=HuggingFaceEmbeddings(),
+        index_name="codebase-rag",
+        namespace=repo_path  # Use repo path as namespace
+    )
+    return files_content
 
 def perform_rag(query):
-    """Perform RAG to answer the query."""
-    model = get_embedding_model()
+    """Execute RAG pipeline."""
+    model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
     query_embedding = model.encode(query)
     
-    # Search Pinecone
     results = pinecone_index.query(
         vector=query_embedding.tolist(),
         top_k=5,
-        include_metadata=True,
-        namespace="current-repo"
+        include_metadata=True
     )
     
-    # Construct prompt with context
     contexts = [item['metadata']['text'] for item in results['matches']]
     augmented_query = (
         "<CONTEXT>\n" + 
@@ -91,74 +94,50 @@ def perform_rag(query):
         query
     )
     
-    # Get response from LLM
-    system_prompt = """You are a Senior Software Engineer. Answer questions about the codebase based on the provided code context.
-    Be specific and reference relevant code when appropriate."""
-    
     response = llm_client.chat.completions.create(
-        model="mixtral-8x7b-32768",
+        model="llama-3.1-8b-instant",
         messages=[
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": "You are a Senior Software Engineer. Answer questions about the codebase based on the provided context."},
             {"role": "user", "content": augmented_query}
         ]
     )
-    
     return response.choices[0].message.content
-
-def clone_repository(repo_url):
-    """Clones a GitHub repository."""
-    try:
-        repo_name = repo_url.split("/")[-1]
-        base_path = os.path.join(os.getcwd(), "repositories")
-        repo_path = os.path.join(base_path, repo_name)
-        
-        # Create directories and clean existing
-        os.makedirs(base_path, exist_ok=True)
-        if os.path.exists(repo_path):
-            import shutil
-            shutil.rmtree(repo_path)
-        
-        # Clone repository
-        Repo.clone_from(repo_url, repo_path)
-        
-        # Process repository
-        documents = process_repository(repo_path)
-        embed_and_store(documents)
-        
-        return os.path.relpath(repo_path, os.getcwd())
-    except Exception as e:
-        st.error(f"Error processing repository: {str(e)}")
-        return None
 
 # Streamlit UI
 st.title("Codebase RAG Assistant")
 
+# Repository input form
 with st.form("repository_form"):
     url = st.text_input("Enter Github https URL:")
     submit = st.form_submit_button("Submit")
 
 if submit and url:
     with st.spinner("Processing repository..."):
-        path = clone_repository(url)
-        if path:
+        try:
+            repo_path = os.path.join(os.getcwd(), "repositories", url.split("/")[-1])
+            os.makedirs(os.path.dirname(repo_path), exist_ok=True)
+            if os.path.exists(repo_path):
+                import shutil
+                shutil.rmtree(repo_path)
+            
+            Repo.clone_from(url, repo_path)
+            files_content = process_repository(repo_path)
             st.success('Repository successfully processed!', icon="✅")
+        except Exception as e:
+            st.error(f"Error processing repository: {str(e)}")
 
-# Initialize chat history
+# Chat interface
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Handle new messages
 if prompt := st.chat_input("Ask about the codebase..."):
-    # Show user message
     st.chat_message("user").markdown(prompt)
     st.session_state.messages.append({"role": "user", "content": prompt})
     
-    # Get and show response
     with st.spinner("Thinking..."):
         response = perform_rag(prompt)
         with st.chat_message("assistant"):
