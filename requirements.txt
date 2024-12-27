@@ -1,2 +1,8 @@
-streamlit==1.40.2
-streamlit-chat==0.1.1
+gitpython
+streamlit
+streamlit-chat
+sentence-transformers
+pinecone-client
+openai
+torch
+transformers
