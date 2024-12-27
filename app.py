@@ -8,6 +8,7 @@ from openai import OpenAI
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain.schema import Document
+import textwrap
 
 # Constants
 SUPPORTED_EXTENSIONS = {'.py', '.js', '.tsx', '.jsx', '.ipynb', '.java', 
@@ -15,6 +16,9 @@ SUPPORTED_EXTENSIONS = {'.py', '.js', '.tsx', '.jsx', '.ipynb', '.java',
 
 IGNORED_DIRS = {'node_modules', 'venv', 'env', 'dist', 'build', '.git',
                 '__pycache__', '.next', '.vscode', 'vendor'}
+
+CHUNK_SIZE = 1000  # Size of each chunk in characters
+METADATA_LIMIT = 40000  # Pinecone's metadata limit in bytes
 
 # Initialize clients
 pinecone = Pinecone(api_key=st.secrets["PINECONE_API_KEY"])
@@ -24,6 +28,10 @@ llm_client = OpenAI(
     base_url="https://api.groq.com/openai/v1",
     api_key=st.secrets["GROQ_API_KEY"]
 )
+
+def chunk_text(text, chunk_size=CHUNK_SIZE):
+    """Split text into chunks of approximately equal size."""
+    return textwrap.wrap(text, chunk_size, break_long_words=False, break_on_hyphens=False)
 
 def get_file_content(file_path, repo_path):
     """Get content of a single file."""
@@ -60,19 +68,40 @@ def process_repository(repo_path):
     """Process repository files and store in Pinecone."""
     files_content = get_main_files_content(repo_path)
     documents = []
-    for file in files_content:
-        doc = Document(
-            page_content=f"{file['name']}\n{file['content']}",
-            metadata={"source": file['name']}
-        )
-        documents.append(doc)
     
-    vectorstore = PineconeVectorStore.from_documents(
-        documents=documents,
-        embedding=HuggingFaceEmbeddings(),
-        index_name="codebase-rag",
-        namespace=repo_path  # Use repo path as namespace
-    )
+    for file in files_content:
+        content = file['content']
+        chunks = chunk_text(content)
+        
+        for i, chunk in enumerate(chunks):
+            # Create a truncated metadata string
+            metadata_content = f"{file['name']} (part {i+1}/{len(chunks)})\n{chunk[:500]}..."
+            
+            doc = Document(
+                page_content=chunk,
+                metadata={
+                    "source": file['name'],
+                    "chunk": i,
+                    "total_chunks": len(chunks),
+                    "text": metadata_content
+                }
+            )
+            documents.append(doc)
+    
+    # Batch process documents
+    batch_size = 100
+    for i in range(0, len(documents), batch_size):
+        batch = documents[i:i + batch_size]
+        try:
+            vectorstore = PineconeVectorStore.from_documents(
+                documents=batch,
+                embedding=HuggingFaceEmbeddings(),
+                index_name="codebase-rag",
+                namespace=repo_path
+            )
+        except Exception as e:
+            st.error(f"Error processing batch {i//batch_size + 1}: {str(e)}")
+    
     return files_content
 
 def perform_rag(query):
@@ -86,7 +115,11 @@ def perform_rag(query):
         include_metadata=True
     )
     
-    contexts = [item['metadata']['text'] for item in results['matches']]
+    contexts = []
+    for match in results['matches']:
+        if 'text' in match['metadata']:
+            contexts.append(match['metadata']['text'])
+    
     augmented_query = (
         "<CONTEXT>\n" + 
         "\n\n-------\n\n".join(contexts[:5]) + 
