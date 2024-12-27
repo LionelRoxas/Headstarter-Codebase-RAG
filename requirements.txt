@@ -1,0 +1,2 @@
+streamlit==1.40.2
+streamlit-chat==0.1.1
