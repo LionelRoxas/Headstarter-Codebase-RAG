@@ -29,6 +29,10 @@ llm_client = OpenAI(
     api_key=st.secrets["GROQ_API_KEY"]
 )
 
+# Initialize session state
+if 'repo_path' not in st.session_state:
+    st.session_state.repo_path = None
+
 def chunk_text(text, chunk_size=CHUNK_SIZE):
     """Split text into chunks of approximately equal size."""
     return textwrap.wrap(text, chunk_size, break_long_words=False, break_on_hyphens=False)
@@ -104,7 +108,7 @@ def process_repository(repo_path):
     
     return files_content
 
-def perform_rag(query):
+def perform_rag(query, repo_path):
     """Execute RAG pipeline."""
     model = SentenceTransformer('sentence-transformers/all-mpnet-base-v2')
     query_embedding = model.encode(query)
@@ -112,7 +116,8 @@ def perform_rag(query):
     results = pinecone_index.query(
         vector=query_embedding.tolist(),
         top_k=5,
-        include_metadata=True
+        include_metadata=True,
+        namespace=repo_path
     )
     
     contexts = []
@@ -155,6 +160,7 @@ if submit and url:
             
             Repo.clone_from(url, repo_path)
             files_content = process_repository(repo_path)
+            st.session_state.repo_path = repo_path  # Store the repo path
             st.success('Repository successfully processed!', icon="✅")
         except Exception as e:
             st.error(f"Error processing repository: {str(e)}")
@@ -168,11 +174,14 @@ for message in st.session_state.messages:
         st.markdown(message["content"])
 
 if prompt := st.chat_input("Ask about the codebase..."):
-    st.chat_message("user").markdown(prompt)
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    
-    with st.spinner("Thinking..."):
-        response = perform_rag(prompt)
-        with st.chat_message("assistant"):
-            st.markdown(response)
-        st.session_state.messages.append({"role": "assistant", "content": response})
+    if st.session_state.repo_path is None:
+        st.error("Please upload a repository first!")
+    else:
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+        
+        with st.spinner("Thinking..."):
+            response = perform_rag(prompt, st.session_state.repo_path)
+            with st.chat_message("assistant"):
+                st.markdown(response)
+            st.session_state.messages.append({"role": "assistant", "content": response})
