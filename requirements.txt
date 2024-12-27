@@ -6,3 +6,6 @@ pinecone-client
 openai
 torch
 transformers
+langchain
+langchain-pinecone
+langchain-community
