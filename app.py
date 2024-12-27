@@ -4,35 +4,41 @@ import streamlit as st
 from streamlit_chat import message
 
 def clone_repository(repo_url):
-    """Clones a GitHub repository to a temporary directory.
+    """Clones a GitHub repository to a temporary directory."""
+    try:
+        # Create repositories directory if it doesn't exist
+        repo_name = repo_url.split("/")[-1]
+        base_path = os.path.join(os.getcwd(), "repositories")
+        repo_path = os.path.join(base_path, repo_name)
+        
+        # Create the repositories directory if it doesn't exist
+        os.makedirs(base_path, exist_ok=True)
+        
+        # Remove existing repo if it exists
+        if os.path.exists(repo_path):
+            import shutil
+            shutil.rmtree(repo_path)
+        
+        # Clone the repository
+        Repo.clone_from(repo_url, repo_path)
+        relative_repo_path = os.path.relpath(repo_path, os.getcwd())
+        return relative_repo_path
+        
+    except Exception as e:
+        st.error(f"Error cloning repository: {str(e)}")
+        return None
 
-    Args:
-        repo_url: The URL of the GitHub repository.
-
-    Returns:
-        The path to the cloned repository.
-    """
-    repo_name = repo_url.split("/")[-1]  # Extract repository name from URL
-    repo_name = repo_url.split("/")[-1]  # Extract repository name from URL
-    repo_path = os.path.join(os.getcwd(), "repositories", repo_name)
-    Repo.clone_from(repo_url, repo_path)
-    relative_repo_path = os.path.relpath(repo_path, os.getcwd())
-    return relative_repo_path
-
+# Rest of your Streamlit app code...
 with st.form("my_form"):
     url = st.text_input("Enter Github http url...")
     submit = st.form_submit_button("Submit")
 
 if submit:
-    print("Url: ", url)
     if url:
-        print("Calling function clone_repository...")
         path = clone_repository(url)
-        print("Rep has been clone to: ", path)
-        st.success('Repository successfully added!', icon="✅")
-
+        if path:
+            st.success('Repository successfully added!', icon="✅")
     else:
-        print("Please, type in a github repository url.")
         st.error('Please, type in a github repository url.', icon="🚨")
 
 
